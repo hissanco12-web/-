@@ -1,11 +1,19 @@
-<div align="center">
+# KINGSMEN LINE
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+Luxury bilingual React/Vite storefront (`ar` RTL & `en` LTR) with a comprehensive private Atelier Admin Command Center (`/admin`).
 
-  <h1>Built with AI Studio</h2>
-
-  <p>The fastest path from prompt to production with Gemini.</p>
-
-  <a href="https://aistudio.google.com/apps">Start building</a>
-
-</div>
+## Architecture & Features
+- **Public Storefront**: React 19 + Vite + React Router (`/ar` & `/en`)
+- **Admin Command Center (`/admin`)**:
+  - Brand Identity & Direct WhatsApp Concierge settings
+  - Full SEO & Meta Tags control (Title, Description, Keywords, OpenGraph Share Image)
+  - Social Media & Google Maps links (`Instagram`, `Snapchat`, `TikTok`, `X`, `Facebook`, `YouTube`, `Google Maps`)
+  - Live Royal Theme & Color Customizer (4 presets + custom hex pickers)
+  - Direct Mobile/Desktop Image Replacement (`ImageReplacer`) across Hero, Craftsmanship Banner, Products, Collections, Services, Offers, Gallery, and Articles
+  - Full JSON Backup Export & Restore
+- **Firebase Connection**:
+  - Project: `kingofline-a2d40`
+  - Auth: Firebase Authentication (`/admins/{uid}`)
+  - Firestore CMS: `siteContent/public`
+  - Storage: `media/public/{category}/{fileName}` with automatic client-side image compression fallback
+- **Deployment Ready**: Configured for both Vercel (`vercel.json`) and Netlify (`netlify.toml` & `public/_redirects`).

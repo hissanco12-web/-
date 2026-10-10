@@ -1,0 +1,6 @@
+{
+  "name": "KINGSMEN LINE",
+  "description": "Discover KINGSMEN LINE: bespoke tailoring, ceremonial royal bishts, and luxury eveningwear crafted with Savile Row precision and Arabian heritage.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

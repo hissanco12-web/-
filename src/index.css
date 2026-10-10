@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --color-black: #090909;
+    --color-soft-black: #111111;
+    --color-white: #F7F7F5;
+    --color-gold: #C9A24A;
+    --color-light-gold: #E0C878;
+    --color-muted-gray: #A3A3A3;
+  }
+
+  html {
+    background-color: #090909;
+    color: #F7F7F5;
+    scroll-behavior: smooth;
+  }
+
+  html[dir="ltr"] body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    letter-spacing: 0.01em;
+  }
+
+  html[dir="rtl"] body {
+    font-family: 'Tajawal', -apple-system, BlinkMacSystemFont, sans-serif;
+    letter-spacing: 0;
+  }
+
+  html[dir="ltr"] .font-editorial {
+    font-family: 'Cormorant Garamond', Georgia, serif;
+  }
+
+  html[dir="rtl"] .font-editorial {
+    font-family: 'Tajawal', sans-serif;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Custom subtle scrollbars for dark luxury theme */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #090909;
+}
+::-webkit-scrollbar-thumb {
+  background: #262626;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #C9A24A;
+}
