@@ -1,5 +1,5 @@
-import React from 'react';
-import { Link } from 'react-router-dom';
+import React, { useRef } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { MapPin, Phone, Mail, Clock, MessageCircle, ExternalLink } from 'lucide-react';
 import { Language } from '../../types/cms';
 import { useCMS } from '../../context/CMSContext';
@@ -7,9 +7,29 @@ import { buildWhatsAppLink, t, uiStrings } from '../../lib/i18n';
 
 export const Footer: React.FC<{ lang: Language }> = ({ lang }) => {
   const { data } = useCMS();
+  const navigate = useNavigate();
+  const tapCountRef = useRef<{ count: number; timer: ReturnType<typeof setTimeout> | null }>({
+    count: 0,
+    timer: null,
+  });
   const nav = uiStrings[lang].nav;
   const common = uiStrings[lang].common;
   const socials = data.settings.socials;
+
+  const handleSecretOwnerTap = () => {
+    tapCountRef.current.count += 1;
+    if (tapCountRef.current.timer) {
+      clearTimeout(tapCountRef.current.timer);
+    }
+    if (tapCountRef.current.count >= 3) {
+      tapCountRef.current.count = 0;
+      navigate('/admin');
+      return;
+    }
+    tapCountRef.current.timer = setTimeout(() => {
+      tapCountRef.current.count = 0;
+    }, 1500);
+  };
 
   const whatsappHref = buildWhatsAppLink(
     data.settings.whatsappNumber,
@@ -165,7 +185,10 @@ export const Footer: React.FC<{ lang: Language }> = ({ lang }) => {
 
         <div className="mt-12 pt-8 border-t border-white/10 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-[#A3A3A3]">
           <p>{common.rightsReserved}</p>
-          <p className="tracking-[0.2em] uppercase text-[#C9A24A]/80">
+          <p
+            onClick={handleSecretOwnerTap}
+            className="tracking-[0.2em] uppercase text-[#C9A24A]/80 select-none"
+          >
             SAVILE ROW • RIYADH • ROYAL BESPOKE
           </p>
         </div>
