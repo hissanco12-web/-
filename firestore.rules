@@ -1,13 +1,21 @@
 rules_version = '2';
+// قواعد حماية Firestore لموقع KINGSMEN LINE
+// - الزوار: قراءة محتوى الموقع العام فقط.
+// - التعديل: للمدير المسجّل دخوله بكلمة السر فقط.
+// ⚠️ بعد أي تعديل هنا انشر القواعد: Firebase Console ← Firestore ← Rules (أو firebase deploy --only firestore:rules)
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
+
+    // المالك: بالمعرّف UID، أو بالبريد بشرط أن يكون مؤكَّداً (يمنع انتحال البريد بحساب غير مؤكَّد)
     function isOwnerAdmin() {
       return signedIn() && (
         request.auth.uid == 'nYe0azkrCYMaJ7yOrkEfkYMQ1K62' ||
-        request.auth.token.email == 'smthysan@gmail.com'
+        (request.auth.token.email == 'smthysan@gmail.com' && request.auth.token.email_verified == true)
       );
     }
+
+    // مدراء إضافيون يضيفهم المالك في admins/{uid}
     function isAdmin() {
       return isOwnerAdmin() || (
         signedIn() &&
@@ -16,22 +24,20 @@ service cloud.firestore {
         get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.active == true
       );
     }
-    function isVerifiedOwnerPayload() {
-      return request.resource.data.settings.adminEmail == 'smthysan@gmail.com';
-    }
 
     match /siteContent/public {
       allow get: if true;
       allow list: if false;
-      allow create, update: if isAdmin() || isVerifiedOwnerPayload();
+      allow create, update: if isAdmin() && request.resource.data.settings is map;
       allow delete: if false;
     }
 
     match /admins/{uid} {
-      allow get: if true;
+      // كل مستخدم يقرأ سجله فقط، والمالك يقرأ الجميع
+      allow get: if signedIn() && (request.auth.uid == uid || isOwnerAdmin());
       allow list: if false;
-      allow create, update: if isOwnerAdmin() || uid == 'nYe0azkrCYMaJ7yOrkEfkYMQ1K62';
-      allow delete: if false;
+      allow create, update: if isOwnerAdmin();
+      allow delete: if isOwnerAdmin();
     }
 
     match /{document=**} {
