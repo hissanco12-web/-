@@ -17,3 +17,16 @@ Luxury bilingual React/Vite storefront (`ar` RTL & `en` LTR) with a comprehensiv
   - Firestore CMS: `siteContent/public`
   - Storage: `media/public/{category}/{fileName}` with automatic client-side image compression fallback
 - **Deployment Ready**: Configured for both Vercel (`vercel.json`) and Netlify (`netlify.toml` & `public/_redirects`).
+
+## التشغيل والنشر
+
+```bash
+npm install      # Node 24
+npm run dev      # تطوير محلي على المنفذ 3000
+npm run lint     # فحص TypeScript
+npm run build    # بناء الإنتاج إلى dist/ (يولّد sitemap.xml و robots.txt)
+```
+
+- **Netlify / Vercel**: يكفي ربط المستودع؛ الإعدادات في `netlify.toml` و `vercel.json`.
+- **Google Search Console**: ملف التحقق `public/google586ac00d1b2618e3.html`، وخريطة الموقع على `/sitemap.xml`.
+- **إعداد Firebase ولوحة التحكم ونشر قواعد الحماية**: راجع [`FIREBASE_SETUP.md`](FIREBASE_SETUP.md).

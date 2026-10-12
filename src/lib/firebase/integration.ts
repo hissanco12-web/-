@@ -2,6 +2,8 @@ import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
 import {
   getAuth,
   signInWithEmailAndPassword,
+  sendPasswordResetEmail,
+  sendEmailVerification,
   signOut as firebaseSignOut,
   onAuthStateChanged,
   User,
@@ -23,6 +25,14 @@ import {
 } from 'firebase/storage';
 import { CMSData } from '../../types/cms';
 
+/**
+ * هوية المالك (المدير الرئيسي).
+ * - هذه القيم ليست سرية؛ الحماية الحقيقية تتم عبر Firebase Authentication (كلمة السر)
+ *   وعبر قواعد firestore.rules و storage.rules التي تتحقق من نفس القيم على الخادم.
+ * - كلمة السر لا تُكتب في الكود أبداً، بل يحددها المالك من Firebase Console
+ *   (Authentication → Users) أو عبر زر "نسيت كلمة السر" في صفحة الدخول.
+ * - أي تغيير هنا يجب أن يقابله نفس التغيير في firestore.rules و storage.rules.
+ */
 export const AUTHORIZED_ADMIN_EMAIL = 'smthysan@gmail.com';
 export const AUTHORIZED_ADMIN_UID = 'nYe0azkrCYMaJ7yOrkEfkYMQ1K62';
 
@@ -111,51 +121,65 @@ export async function fetchPublicSiteContent(): Promise<CMSData | null> {
   }
 }
 
-export async function savePublicSiteContent(data: CMSData): Promise<boolean> {
-  if (!db) return false;
+/** الحد الأقصى لحجم وثيقة Firestore هو 1MB؛ نترك هامشاً للأمان. */
+const FIRESTORE_DOC_SAFE_BYTES = 950 * 1024;
+
+/**
+ * يحفظ محتوى الموقع في Firestore (siteContent/public).
+ * يرمي خطأً واضحاً بالعربية عند الفشل بدل الادعاء بنجاح الحفظ.
+ */
+export async function savePublicSiteContent(data: CMSData): Promise<void> {
+  if (!db) {
+    throw new Error('Firebase غير مهيأ، لا يمكن الحفظ في السحابة.');
+  }
+  if (!auth?.currentUser) {
+    throw new Error('انتهت جلسة الدخول. سجّل الدخول مرة أخرى ثم أعد الحفظ.');
+  }
+  const payload: CMSData = {
+    ...data,
+    updatedAt: new Date().toISOString(),
+  };
+  const sizeBytes = new Blob([JSON.stringify(payload)]).size;
+  if (sizeBytes > FIRESTORE_DOC_SAFE_BYTES) {
+    throw new Error(
+      `حجم بيانات الموقع (${Math.round(sizeBytes / 1024)}KB) تجاوز حد Firestore (1MB). ` +
+        'السبب غالباً صور محفوظة داخل البيانات بدل Firebase Storage. فعّل Storage أو استبدل بعض الصور بروابط.'
+    );
+  }
   try {
-    const payload: CMSData = {
-      ...data,
-      updatedAt: new Date().toISOString(),
-    };
-    await withTimeout(setDoc(doc(db, 'siteContent', 'public'), payload, { merge: false }), 5000);
-    return true;
+    await withTimeout(setDoc(doc(db, 'siteContent', 'public'), payload, { merge: false }), 15000);
   } catch (err) {
-    console.warn('Cloud save fallback to local cache:', err);
-    return false;
+    throw new Error(describeFirebaseError(err, 'تعذر الحفظ في Firestore.'));
   }
 }
 
-export async function verifyAdminRecord(user: User): Promise<boolean> {
-  if (
+/** هل هذا المستخدم هو المالك (بالمعرّف UID أو بالبريد)؟ */
+export function isOwnerUser(user: User): boolean {
+  return (
     user.uid === AUTHORIZED_ADMIN_UID ||
-    (user.email && user.email.toLowerCase() === AUTHORIZED_ADMIN_EMAIL)
-  ) {
-    if (db) {
-      try {
-        await withTimeout(
-          setDoc(
-            doc(db, 'admins', user.uid),
-            {
-              email: user.email || AUTHORIZED_ADMIN_EMAIL,
-              active: true,
-              updatedAt: new Date().toISOString(),
-            },
-            { merge: true }
-          ),
-          2500
-        );
-      } catch {
-        // Ignore if rules restrict client-side creation of /admins/{uid}
-      }
-    }
-    return true;
-  }
+    (user.email || '').toLowerCase() === AUTHORIZED_ADMIN_EMAIL
+  );
+}
 
-  if (!db) return true;
+/**
+ * قواعد Firestore تقبل المالك عبر البريد فقط إذا كان البريد مؤكَّداً (email_verified)،
+ * أو عبر المعرّف UID مباشرة. هذه الدالة تخبر الواجهة إن كان التأكيد مطلوباً.
+ */
+export function ownerNeedsEmailVerification(user: User): boolean {
+  return user.uid !== AUTHORIZED_ADMIN_UID && !user.emailVerified;
+}
+
+/**
+ * يتحقق أن المستخدم المسجَّل مدير فعلاً.
+ * - المالك: مسموح دائماً.
+ * - غيره: يجب وجود سجل admins/{uid} مفعّل وبنفس البريد.
+ * - عند أي خطأ: الرفض (لا نفتح اللوحة عند الشك).
+ */
+export async function verifyAdminRecord(user: User): Promise<boolean> {
+  if (isOwnerUser(user)) return true;
+  if (!db) return false;
   try {
-    const adminRef = doc(db, 'admins', user.uid);
-    const snap = await withTimeout(getDoc(adminRef), 3000);
+    const snap = await withTimeout(getDoc(doc(db, 'admins', user.uid)), 5000);
     if (!snap.exists()) return false;
     const data = snap.data();
     return Boolean(
@@ -166,41 +190,88 @@ export async function verifyAdminRecord(user: User): Promise<boolean> {
         data.email.toLowerCase() === user.email.toLowerCase()
     );
   } catch {
-    return true;
+    return false;
   }
 }
 
-export async function adminSignIn(
-  email: string,
-  password: string
-): Promise<{ user: User | null; isVerifiedAdmin: boolean }> {
+/** يحوّل رموز أخطاء Firebase إلى رسائل عربية مفهومة تشرح السبب الحقيقي. */
+export function describeFirebaseError(err: unknown, fallback: string): string {
+  const code = (err as { code?: string })?.code || (err instanceof Error ? err.message : '');
+  switch (code) {
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/invalid-login-credentials':
+      return 'البريد الإلكتروني أو كلمة السر غير صحيحة. يمكنك استخدام "نسيت كلمة السر".';
+    case 'auth/user-not-found':
+      return 'لا يوجد حساب بهذا البريد في Firebase Authentication. أنشئه من Firebase Console ← Authentication ← Users.';
+    case 'auth/invalid-email':
+      return 'صيغة البريد الإلكتروني غير صحيحة.';
+    case 'auth/user-disabled':
+      return 'هذا الحساب معطّل في Firebase Authentication.';
+    case 'auth/operation-not-allowed':
+      return 'طريقة الدخول بالبريد وكلمة السر غير مفعّلة. فعّلها من Firebase Console ← Authentication ← Sign-in method ← Email/Password.';
+    case 'auth/unauthorized-domain':
+      return `هذا النطاق (${window.location.hostname}) غير مصرّح له. أضفه من Firebase Console ← Authentication ← Settings ← Authorized domains.`;
+    case 'auth/too-many-requests':
+      return 'محاولات كثيرة خاطئة. انتظر بضع دقائق أو أعد تعيين كلمة السر.';
+    case 'auth/network-request-failed':
+    case 'TIMEOUT':
+      return 'تعذر الاتصال بخوادم Firebase. تحقق من الإنترنت ثم أعد المحاولة.';
+    case 'auth/missing-password':
+      return 'أدخل كلمة السر.';
+    case 'permission-denied':
+      return 'رفضت قواعد Firebase العملية. تأكد من نشر firestore.rules الجديدة ومن تأكيد بريدك الإلكتروني (انظر FIREBASE_SETUP.md).';
+    case 'unauthenticated':
+      return 'انتهت جلسة الدخول. سجّل الدخول مرة أخرى.';
+    default:
+      return code ? `${fallback} (${code})` : fallback;
+  }
+}
+
+/**
+ * تسجيل دخول المدير بالبريد وكلمة السر عبر Firebase Authentication فقط.
+ * لا يوجد أي مسار يفتح اللوحة بدون كلمة سر صحيحة.
+ */
+export async function adminSignIn(email: string, password: string): Promise<User> {
+  if (!auth) throw new Error('Firebase Authentication غير مهيأ.');
   const cleanEmail = email.trim().toLowerCase();
+  if (!cleanEmail || !password) throw new Error('أدخل البريد الإلكتروني وكلمة السر.');
 
-  if (auth && password.trim().length > 0) {
-    try {
-      const cred = await withTimeout(
-        signInWithEmailAndPassword(auth, cleanEmail, password),
-        5000
-      );
-      const isVerifiedAdmin = await verifyAdminRecord(cred.user);
-      if (isVerifiedAdmin) {
-        return { user: cred.user, isVerifiedAdmin: true };
-      }
-    } catch (err) {
-      // If the email is the authorized owner email, allow fallback entry even on network/iframe restrictions
-      if (cleanEmail === AUTHORIZED_ADMIN_EMAIL) {
-        console.warn('Firebase Auth network/rule fallback activated for owner:', err);
-        return { user: null, isVerifiedAdmin: true };
-      }
-      throw err;
-    }
+  let user: User;
+  try {
+    const cred = await withTimeout(signInWithEmailAndPassword(auth, cleanEmail, password), 15000);
+    user = cred.user;
+  } catch (err) {
+    throw new Error(describeFirebaseError(err, 'فشل تسجيل الدخول.'));
   }
 
-  if (cleanEmail === AUTHORIZED_ADMIN_EMAIL) {
-    return { user: null, isVerifiedAdmin: true };
+  if (!(await verifyAdminRecord(user))) {
+    await adminSignOut();
+    throw new Error('تم التحقق من كلمة السر، لكن هذا الحساب غير مصرّح له بإدارة الموقع.');
   }
+  return user;
+}
 
-  throw new Error('البريد الإلكتروني غير مصرح له بالدخول كمدير.');
+/** يرسل رابط إعادة تعيين كلمة السر إلى البريد. */
+export async function adminResetPassword(email: string): Promise<void> {
+  if (!auth) throw new Error('Firebase Authentication غير مهيأ.');
+  const cleanEmail = email.trim().toLowerCase();
+  if (!cleanEmail) throw new Error('اكتب بريدك الإلكتروني أولاً ثم اضغط "نسيت كلمة السر".');
+  try {
+    await withTimeout(sendPasswordResetEmail(auth, cleanEmail), 15000);
+  } catch (err) {
+    throw new Error(describeFirebaseError(err, 'تعذر إرسال رابط إعادة التعيين.'));
+  }
+}
+
+/** يرسل رسالة تأكيد البريد للمستخدم الحالي. */
+export async function sendAdminEmailVerification(): Promise<void> {
+  if (!auth?.currentUser) throw new Error('سجّل الدخول أولاً.');
+  try {
+    await withTimeout(sendEmailVerification(auth.currentUser), 15000);
+  } catch (err) {
+    throw new Error(describeFirebaseError(err, 'تعذر إرسال رسالة التأكيد.'));
+  }
 }
 
 export async function adminSignOut(): Promise<void> {
@@ -221,43 +292,92 @@ export function subscribeToAdminAuth(callback: (user: User | null) => void): () 
   return onAuthStateChanged(auth, callback);
 }
 
-async function compressImageToDataUrl(file: File, maxWidth = 1200, quality = 0.8): Promise<string> {
+/** يحمّل ملف الصورة كعنصر Image لاستخدامه في الضغط. */
+function loadImage(file: File): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error('Failed to read image file'));
-    reader.onload = () => {
-      const img = new Image();
-      img.onerror = () => reject(new Error('Invalid image file'));
-      img.onload = () => {
-        const scale = img.width > maxWidth ? maxWidth / img.width : 1;
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.round(img.width * scale);
-        canvas.height = Math.round(img.height * scale);
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          resolve(reader.result as string);
-          return;
-        }
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL('image/jpeg', quality));
-      };
-      img.src = reader.result as string;
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(img);
     };
-    reader.readAsDataURL(file);
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('ملف الصورة غير صالح أو غير مدعوم.'));
+    };
+    img.src = objectUrl;
   });
 }
 
-export async function uploadPublicMedia(category: string, file: File): Promise<string> {
-  if (storage) {
+/** يرسم الصورة على canvas بعرض أقصى محدد ويعيد الـ canvas. */
+async function drawScaled(file: File, maxWidth: number): Promise<HTMLCanvasElement> {
+  const img = await loadImage(file);
+  const scale = img.naturalWidth > maxWidth ? maxWidth / img.naturalWidth : 1;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('المتصفح لا يدعم معالجة الصور.');
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+/** يضغط الصورة إلى WebP (أو JPEG إن لم يدعم المتصفح WebP) للرفع إلى Storage. */
+async function compressImageToBlob(file: File, maxWidth = 1600, quality = 0.82): Promise<Blob> {
+  const canvas = await drawScaled(file, maxWidth);
+  const toBlob = (type: string) =>
+    new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, quality));
+  const webp = await toBlob('image/webp');
+  if (webp && webp.type === 'image/webp') return webp;
+  const jpeg = await toBlob('image/jpeg');
+  if (!jpeg) throw new Error('تعذر ضغط الصورة.');
+  return jpeg;
+}
+
+/**
+ * نسخة احتياطية صغيرة جداً (Base64) تُستخدم فقط إذا كان Firebase Storage غير متاح،
+ * حتى لا يتوقف تعديل الموقع. حجمها صغير عمداً لأن وثيقة Firestore محدودة بـ 1MB.
+ */
+async function compressImageToSmallDataUrl(file: File): Promise<string> {
+  const canvas = await drawScaled(file, 800);
+  return canvas.toDataURL('image/jpeg', 0.7);
+}
+
+export interface UploadResult {
+  url: string;
+  /** true = الصورة مرفوعة على Firebase Storage (الوضع الصحيح). */
+  storedInCloud: boolean;
+}
+
+/**
+ * يرفع صورة إلى Firebase Storage بعد ضغطها، ويعيد رابطها العام.
+ * إذا كان Storage غير متاح (مثلاً غير مفعّل في المشروع) يعيد نسخة Base64 صغيرة
+ * مع storedInCloud=false حتى تُظهر الواجهة تنبيهاً للمالك.
+ */
+export async function uploadPublicMedia(category: string, file: File): Promise<UploadResult> {
+  if (!file.type.startsWith('image/')) {
+    throw new Error('الملف المختار ليس صورة.');
+  }
+  if (storage && auth?.currentUser) {
     try {
+      const blob = await compressImageToBlob(file);
+      const ext = blob.type === 'image/webp' ? 'webp' : 'jpg';
       const safeCategory = category.replace(/[^a-zA-Z0-9_-]/g, '') || 'general';
-      const safeName = `${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-      const storageRef = ref(storage, `media/public/${safeCategory}/${safeName}`);
-      await withTimeout(uploadBytes(storageRef, file, { contentType: file.type }), 4000);
-      return await withTimeout(getDownloadURL(storageRef), 3000);
+      const baseName =
+        file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60) || 'image';
+      const storageRef = ref(storage, `media/public/${safeCategory}/${Date.now()}_${baseName}.${ext}`);
+      await withTimeout(
+        uploadBytes(storageRef, blob, {
+          contentType: blob.type,
+          cacheControl: 'public, max-age=31536000, immutable',
+        }),
+        60000
+      );
+      const url = await withTimeout(getDownloadURL(storageRef), 15000);
+      return { url, storedInCloud: true };
     } catch (err) {
-      console.warn('Storage bucket upload fallback to compressed image:', err);
+      console.warn('Storage upload failed, using small inline fallback:', err);
     }
   }
-  return await compressImageToDataUrl(file);
+  return { url: await compressImageToSmallDataUrl(file), storedInCloud: false };
 }

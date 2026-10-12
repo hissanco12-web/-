@@ -27,13 +27,17 @@ import {
 } from 'lucide-react';
 import { useCMS } from '../context/CMSContext';
 import { initialCMSData } from '../data/initialData';
+import type { User } from 'firebase/auth';
 import {
-  adminSignIn,
   adminSignOut,
+  ownerNeedsEmailVerification,
+  isOwnerUser,
+  sendAdminEmailVerification,
   subscribeToAdminAuth,
   uploadPublicMedia,
   verifyAdminRecord,
 } from '../lib/firebase/integration';
+import { AdminLogin } from './AdminLogin';
 import {
   ArticleItem,
   CMSData,
@@ -94,8 +98,7 @@ type AdminTab =
   | 'offers'
   | 'gallery'
   | 'articles'
-  | 'pages'
-  | 'githubSync';
+  | 'pages';
 
 const DEFAULT_THEME: AdminThemeColors = {
   primaryBg: '#090909',
@@ -184,32 +187,6 @@ const COLOR_PRESETS: { name: string; theme: AdminThemeColors }[] = [
   },
 ];
 
-async function compressImageFile(file: File, maxWidth = 1200, quality = 0.8): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error('تعذر قراءة ملف الصورة'));
-    reader.onload = () => {
-      const img = new Image();
-      img.onerror = () => reject(new Error('ملف الصورة غير صالح'));
-      img.onload = () => {
-        const scale = img.width > maxWidth ? maxWidth / img.width : 1;
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.round(img.width * scale);
-        canvas.height = Math.round(img.height * scale);
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          resolve(reader.result as string);
-          return;
-        }
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL('image/jpeg', quality));
-      };
-      img.src = reader.result as string;
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
 interface ImageReplacerProps {
   label: string;
   imageUrl: string;
@@ -286,21 +263,12 @@ export default function AdminPortal() {
   const [draft, setDraft] = useState<CMSData>(data);
   const [activeTab, setActiveTab] = useState<AdminTab>('settings');
   const [activePageKey, setActivePageKey] = useState<'about' | 'privacy' | 'terms'>('about');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
-    try {
-      return sessionStorage.getItem('kingsmen_admin_unlocked') === 'true';
-    } catch {
-      return false;
-    }
-  });
+  // المستخدم المسجَّل والمتحقق من صلاحيته (null = غير مسجّل).
+  // Firebase يحفظ الجلسة تلقائياً، فلا حاجة لإعادة الدخول عند تحديث الصفحة.
+  const [adminUser, setAdminUser] = useState<User | null>(null);
+  const [authChecking, setAuthChecking] = useState(true);
   const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const [githubRepo, setGithubRepo] = useState('');
-  const [githubBranch, setGithubBranch] = useState('main');
-  const [githubToken, setGithubToken] = useState('');
-  const [isPushingGithub, setIsPushingGithub] = useState(false);
 
   useEffect(() => {
     setDraft(data);
@@ -308,17 +276,10 @@ export default function AdminPortal() {
 
   useEffect(() => {
     const unsub = subscribeToAdminAuth(async (user) => {
-      if (user) {
-        const ok = await verifyAdminRecord(user);
-        if (ok) {
-          setIsAuthenticated(true);
-          try {
-            sessionStorage.setItem('kingsmen_admin_unlocked', 'true');
-          } catch {
-            // ignore
-          }
-        }
-      }
+      // الصلاحية تُحدَّد فقط من Firebase Authentication + verifyAdminRecord.
+      const ok = user ? await verifyAdminRecord(user) : false;
+      setAdminUser(ok ? user : null);
+      setAuthChecking(false);
     });
     return () => unsub();
   }, []);
@@ -345,48 +306,6 @@ export default function AdminPortal() {
     });
   };
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setStatusMsg(null);
-    const cleanEmail = email.trim().toLowerCase();
-    const configuredAdmin = (data.settings.adminEmail || 'smthysan@gmail.com').toLowerCase();
-
-    if (cleanEmail === 'smthysan@gmail.com' || cleanEmail === configuredAdmin) {
-      setIsAuthenticated(true);
-      try {
-        sessionStorage.removeItem('kingsmen_admin_locked');
-        sessionStorage.setItem('kingsmen_admin_unlocked', 'true');
-      } catch {
-        // ignore
-      }
-      // Attempt background Firebase sign-in if password provided, without blocking UI
-      if (password.trim().length > 0) {
-        adminSignIn(cleanEmail, password).catch(() => {});
-      }
-      setStatusMsg({
-        type: 'success',
-        text: 'تم فتح لوحة التحكم بنجاح.',
-      });
-      return;
-    }
-
-    try {
-      await adminSignIn(cleanEmail, password);
-      setIsAuthenticated(true);
-      try {
-        sessionStorage.setItem('kingsmen_admin_unlocked', 'true');
-      } catch {
-        // ignore
-      }
-      setStatusMsg({ type: 'success', text: 'تم التحقق من حساب المدير بنجاح.' });
-    } catch (err) {
-      setStatusMsg({
-        type: 'error',
-        text: err instanceof Error ? err.message : 'فشل تسجيل الدخول',
-      });
-    }
-  };
-
   const handleSave = async () => {
     setIsSaving(true);
     setStatusMsg(null);
@@ -411,17 +330,21 @@ export default function AdminPortal() {
   const handleImageUpload = async (category: string, file: File, onUrl: (url: string) => void) => {
     setStatusMsg({ type: 'success', text: 'جاري معالجة واستبدال الصورة...' });
     try {
-      let url = '';
-      try {
-        url = await uploadPublicMedia(category, file);
-      } catch {
-        url = await compressImageFile(file);
-      }
+      const { url, storedInCloud } = await uploadPublicMedia(category, file);
       onUrl(url);
-      setStatusMsg({
-        type: 'success',
-        text: 'تم استبدال الصورة بنجاح! اضغط على زر "حفظ جميع التغييرات" في الأعلى لاعتمادها.',
-      });
+      setStatusMsg(
+        storedInCloud
+          ? {
+              type: 'success',
+              text: 'تم رفع الصورة إلى Firebase Storage بنجاح! اضغط على زر "حفظ جميع التغييرات" في الأعلى لاعتمادها.',
+            }
+          : {
+              type: 'error',
+              text:
+                'تنبيه: Firebase Storage غير متاح، فحُفظت نسخة مصغّرة من الصورة داخل بيانات الموقع مؤقتاً. ' +
+                'كثرة هذه الصور قد تمنع الحفظ (حد 1MB). فعّل Storage من Firebase Console (راجع FIREBASE_SETUP.md).',
+            }
+      );
     } catch (err) {
       setStatusMsg({
         type: 'error',
@@ -554,76 +477,16 @@ export default function AdminPortal() {
     setDraft({ ...draft, articles: [newArt, ...draft.articles] });
   };
 
-  if (!isAuthenticated) {
+  if (authChecking) {
     return (
-      <div dir="rtl" className="min-h-screen bg-[#090909] text-[#F7F7F5] flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-[#111111] border border-[#C9A24A]/40 p-8 space-y-6">
-          <div className="flex items-center gap-3 text-[#C9A24A]">
-            <Shield className="w-7 h-7" />
-            <div>
-              <h1 className="font-editorial text-2xl tracking-wider text-[#F7F7F5]">
-                KINGSMEN LINE
-              </h1>
-              <p className="text-xs text-[#C9A24A]">مركز قيادة الأتيليه — بوابة المدير (`/admin`)</p>
-            </div>
-          </div>
-
-          {statusMsg && (
-            <div
-              className={`p-3 text-xs border flex items-center gap-2 ${
-                statusMsg.type === 'success'
-                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                  : 'border-red-500/40 bg-red-500/10 text-red-300'
-              }`}
-            >
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>{statusMsg.text}</span>
-            </div>
-          )}
-
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div className="space-y-1.5">
-              <label className="block text-xs text-[#A3A3A3]">البريد الإلكتروني للمدير</label>
-              <input
-                type="email"
-                required
-                dir="ltr"
-                placeholder="admin@kingsmenline.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="w-full bg-[#090909] border border-white/15 focus:border-[#C9A24A] px-3.5 py-2.5 text-sm outline-none"
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="block text-xs text-[#A3A3A3]">كلمة المرور</label>
-              <input
-                type="password"
-                dir="ltr"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                className="w-full bg-[#090909] border border-white/15 focus:border-[#C9A24A] px-3.5 py-2.5 text-sm outline-none"
-              />
-            </div>
-
-            <button
-              type="submit"
-              className="w-full py-3.5 bg-[#C9A24A] hover:bg-[#E0C878] text-[#090909] font-semibold text-xs uppercase tracking-[0.16em] transition-colors"
-            >
-              دخول لوحة الإدارة الآن
-            </button>
-          </form>
-
-          <div className="pt-4 border-t border-white/10 flex items-center justify-between text-xs text-[#A3A3A3]">
-            <Link to="/ar" className="text-[#C9A24A] hover:underline">
-              ← العودة للموقع العام
-            </Link>
-            <span>Project: kingofline-a2d40</span>
-          </div>
-        </div>
+      <div className="min-h-screen bg-[#090909] text-[#C9A24A] flex items-center justify-center text-xs uppercase tracking-[0.2em]">
+        جاري التحقق من جلسة الدخول...
       </div>
     );
+  }
+
+  if (!adminUser) {
+    return <AdminLogin />;
   }
 
   const tabs: { id: AdminTab; label: string; icon: React.ReactNode }[] = [
@@ -638,7 +501,6 @@ export default function AdminPortal() {
     { id: 'gallery', label: `المعرض (${draft.gallery.length})`, icon: <ImageIcon className="w-3.5 h-3.5" /> },
     { id: 'articles', label: `المجلة (${draft.articles.length})`, icon: <FileText className="w-3.5 h-3.5" /> },
     { id: 'pages', label: 'الصفحات الثابتة', icon: <Sparkles className="w-3.5 h-3.5" /> },
-    { id: 'githubSync', label: 'تحديث GitHub / Vercel / Firebase', icon: <Share2 className="w-3.5 h-3.5" /> },
   ];
 
   return (
@@ -680,12 +542,7 @@ export default function AdminPortal() {
               type="button"
               onClick={async () => {
                 await adminSignOut();
-                try {
-                  sessionStorage.removeItem('kingsmen_admin_unlocked');
-                } catch {
-                  // ignore
-                }
-                setIsAuthenticated(false);
+                setAdminUser(null);
               }}
               className="p-2 text-[#A3A3A3] hover:text-red-400 border border-white/10"
               title="تسجيل الخروج"
@@ -697,6 +554,39 @@ export default function AdminPortal() {
       </header>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+        {/* حساب الدخول الحالي — مفيد للتأكد من المعرّف UID عند ضبط قواعد Firebase */}
+        <div className="text-[11px] text-[#A3A3A3] flex flex-wrap gap-x-4 gap-y-1" dir="ltr">
+          <span>{adminUser.email}</span>
+          <span>UID: {adminUser.uid}</span>
+        </div>
+
+        {/* قواعد Firestore تقبل بريد المالك فقط إذا كان مؤكَّداً، لذا ننبّه قبل أن يفشل الحفظ */}
+        {isOwnerUser(adminUser) && ownerNeedsEmailVerification(adminUser) && (
+          <div className="p-4 border border-amber-500/40 bg-amber-500/10 text-amber-200 text-xs space-y-2 leading-relaxed">
+            <p>
+              بريدك الإلكتروني غير مؤكَّد بعد، وقواعد الحماية تتطلب تأكيده قبل حفظ التعديلات.
+              اضغط الزر لإرسال رسالة التأكيد، افتح الرابط في بريدك، ثم سجّل الخروج وادخل مرة أخرى.
+            </p>
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  await sendAdminEmailVerification();
+                  setStatusMsg({ type: 'success', text: `تم إرسال رسالة التأكيد إلى ${adminUser.email}.` });
+                } catch (err) {
+                  setStatusMsg({
+                    type: 'error',
+                    text: err instanceof Error ? err.message : 'تعذر إرسال رسالة التأكيد.',
+                  });
+                }
+              }}
+              className="px-3 py-1.5 border border-amber-400/60 hover:bg-amber-400/10"
+            >
+              إرسال رسالة تأكيد البريد
+            </button>
+          </div>
+        )}
+
         {statusMsg && (
           <div
             className={`p-4 border text-xs flex items-center gap-2 ${
@@ -2181,201 +2071,6 @@ export default function AdminPortal() {
                   </div>
                 </div>
               ))}
-            </div>
-          </div>
-        )}
-
-        {/* 12. GitHub, Vercel & Firebase Direct Sync Tab */}
-        {activeTab === 'githubSync' && (
-          <div className="space-y-6">
-            <div className="bg-[#111111] border border-[#C9A24A]/40 p-6 space-y-4">
-              <h2 className="text-sm font-semibold text-[#C9A24A]">
-                1. حل مشكلة "تأكد من إعدادات الشبكة" وإغلاق لوحة التحكم على Vercel و Netlify نهائياً
-              </h2>
-              <p className="text-xs text-[#A3A3A3] leading-relaxed">
-                سبب ظهور رسالة <strong>"تأكد من إعدادات الشبكة"</strong> على موقعك الخارجي هو أن Firebase Authentication يرفض الاتصال من نطاقات Vercel أو Netlify غير المضافة في قائمة النطاقات المصرح بها (Authorized Domains)، أو بسبب بقاء النسخة القديمة في مستودعك الأساسي.
-              </p>
-              <div className="bg-[#090909] border border-white/10 p-4 space-y-3 text-xs">
-                <p className="text-[#E0C878] font-semibold">خطوتان سريعتان في Firebase Console تحل المشكلة فوراً حتى بدون تحديث الكود:</p>
-                <ol className="list-decimal list-inside space-y-2 text-[#F7F7F5]/90">
-                  <li>
-                    افتح مشروع <code>kingofline-a2d40</code> في Firebase Console ثم اذهب إلى{' '}
-                    <strong>Authentication → Settings → Authorized domains</strong> واضغط <strong>Add domain</strong> وأضف رابط موقعك على Vercel ورابط Netlify (بدون https://).
-                  </li>
-                  <li>
-                    اذهب إلى <strong>Firestore Database → Rules</strong> والصق القواعد الذكية التالية ثم اضغط <strong>Publish</strong> (تسمح بحفظ تعديلات المالك حتى لو تعطل اتصال الشبكة في Auth):
-                  </li>
-                </ol>
-                <pre
-                  dir="ltr"
-                  className="bg-[#111111] border border-white/15 p-3 text-[11px] text-emerald-300 overflow-x-auto"
-                >{`rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    function signedIn() { return request.auth != null; }
-    function isOwnerAdmin() {
-      return signedIn() && (
-        request.auth.uid == 'nYe0azkrCYMaJ7yOrkEfkYMQ1K62' ||
-        request.auth.token.email == 'smthysan@gmail.com'
-      );
-    }
-    function isVerifiedOwnerPayload() {
-      return request.resource.data.settings.adminEmail == 'smthysan@gmail.com';
-    }
-    match /siteContent/public {
-      allow get: if true;
-      allow list: if false;
-      allow create, update: if isOwnerAdmin() || isVerifiedOwnerPayload();
-      allow delete: if false;
-    }
-    match /admins/{uid} {
-      allow get: if true;
-      allow list: if false;
-      allow create, update: if isOwnerAdmin() || uid == 'nYe0azkrCYMaJ7yOrkEfkYMQ1K62';
-      allow delete: if false;
-    }
-  }
-}`}</pre>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const rulesText = `rules_version = '2';\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    function signedIn() { return request.auth != null; }\n    function isOwnerAdmin() {\n      return signedIn() && (\n        request.auth.uid == 'nYe0azkrCYMaJ7yOrkEfkYMQ1K62' ||\n        request.auth.token.email == 'smthysan@gmail.com'\n      );\n    }\n    function isVerifiedOwnerPayload() {\n      return request.resource.data.settings.adminEmail == 'smthysan@gmail.com';\n    }\n    match /siteContent/public {\n      allow get: if true;\n      allow list: if false;\n      allow create, update: if isOwnerAdmin() || isVerifiedOwnerPayload();\n      allow delete: if false;\n    }\n    match /admins/{uid} {\n      allow get: if true;\n      allow list: if false;\n      allow create, update: if isOwnerAdmin() || uid == 'nYe0azkrCYMaJ7yOrkEfkYMQ1K62';\n      allow delete: if false;\n    }\n  }\n}`;
-                    navigator.clipboard?.writeText(rulesText);
-                    setStatusMsg({ type: 'success', text: 'تم نسخ قواعد Firestore الذكية! الصقها في Firebase Console -> Firestore -> Rules.' });
-                  }}
-                  className="px-4 py-2 bg-[#C9A24A] text-[#090909] font-semibold text-xs"
-                >
-                  نسخ قواعد Firestore الذكية بضغطة واحدة
-                </button>
-              </div>
-            </div>
-
-            <div className="bg-[#111111] border border-white/10 p-6 space-y-4">
-              <h2 className="text-sm font-semibold text-[#C9A24A]">
-                2. تحديث المستودع الأساسي في GitHub مباشرة من هنا (ليتحدث Vercel و Netlify تلقائياً)
-              </h2>
-              <p className="text-xs text-[#A3A3A3] leading-relaxed">
-                بما أنك حذفت المستودع السابق، يمكنك إما استخدام زر <strong>Save to GitHub</strong> في أعلى نافذة AI Studio واختيار مستودعك الأساسي، أو إرسال التحديث مباشرة من هذه البوابة إلى مستودعك الأساسي في GitHub:
-              </p>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-xs text-[#A3A3A3] mb-1">
-                    اسم المستودع الأساسي (مثال: username/kingsmen-line)
-                  </label>
-                  <input
-                    type="text"
-                    dir="ltr"
-                    placeholder="owner/repository"
-                    value={githubRepo}
-                    onChange={(e) => setGithubRepo(e.target.value)}
-                    className="w-full bg-[#090909] border border-white/15 px-3 py-2 text-xs"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-[#A3A3A3] mb-1">الفرع الأساسي (Branch)</label>
-                  <input
-                    type="text"
-                    dir="ltr"
-                    placeholder="main"
-                    value={githubBranch}
-                    onChange={(e) => setGithubBranch(e.target.value)}
-                    className="w-full bg-[#090909] border border-white/15 px-3 py-2 text-xs"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs text-[#A3A3A3] mb-1">
-                    رمز وصول GitHub (Personal Access Token)
-                  </label>
-                  <input
-                    type="password"
-                    dir="ltr"
-                    placeholder="ghp_..."
-                    value={githubToken}
-                    onChange={(e) => setGithubToken(e.target.value)}
-                    className="w-full bg-[#090909] border border-white/15 px-3 py-2 text-xs"
-                  />
-                </div>
-              </div>
-
-              <button
-                type="button"
-                disabled={isPushingGithub}
-                onClick={async () => {
-                  const cleanRepo = githubRepo.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/$/, '');
-                  if (!cleanRepo || !cleanRepo.includes('/') || !githubToken.trim()) {
-                    setStatusMsg({
-                      type: 'error',
-                      text: 'يرجى إدخال اسم المستودع بصيغة username/repo ورمز GitHub Token.',
-                    });
-                    return;
-                  }
-                  setIsPushingGithub(true);
-                  setStatusMsg({ type: 'success', text: 'جاري الاتصال بـ GitHub وتحديث المستودع الأساسي...' });
-                  try {
-                    const branch = githubBranch.trim() || 'main';
-                    const headers: Record<string, string> = {
-                      Authorization: `Bearer ${githubToken.trim()}`,
-                      Accept: 'application/vnd.github+json',
-                      'Content-Type': 'application/json',
-                    };
-
-                    const filesToUpdate: { path: string; content: string; msg: string }[] = [
-                      {
-                        path: 'firestore.rules',
-                        content: `rules_version = '2';\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    function signedIn() { return request.auth != null; }\n    function isOwnerAdmin() {\n      return signedIn() && (\n        request.auth.uid == 'nYe0azkrCYMaJ7yOrkEfkYMQ1K62' ||\n        request.auth.token.email == 'smthysan@gmail.com'\n      );\n    }\n    function isVerifiedOwnerPayload() {\n      return request.resource.data.settings.adminEmail == 'smthysan@gmail.com';\n    }\n    match /siteContent/public {\n      allow get: if true;\n      allow list: if false;\n      allow create, update: if isOwnerAdmin() || isVerifiedOwnerPayload();\n      allow delete: if false;\n    }\n    match /admins/{uid} {\n      allow get: if true;\n      allow list: if false;\n      allow create, update: if isOwnerAdmin() || uid == 'nYe0azkrCYMaJ7yOrkEfkYMQ1K62';\n      allow delete: if false;\n    }\n  }\n}\n`,
-                        msg: 'Update firestore.rules for network-resilient admin access',
-                      },
-                      {
-                        path: 'src/data/siteContentBackup.json',
-                        content: JSON.stringify(draft, null, 2),
-                        msg: 'Update KINGSMEN LINE CMS content & admin settings',
-                      },
-                    ];
-
-                    for (const fileItem of filesToUpdate) {
-                      const apiUrl = `https://api.github.com/repos/${cleanRepo}/contents/${fileItem.path}`;
-                      let sha: string | undefined;
-                      const getRes = await fetch(`${apiUrl}?ref=${encodeURIComponent(branch)}`, {
-                        headers,
-                      });
-                      if (getRes.ok) {
-                        const existing = (await getRes.json()) as { sha?: string };
-                        sha = existing.sha;
-                      }
-                      const contentBase64 = btoa(unescape(encodeURIComponent(fileItem.content)));
-                      const putRes = await fetch(apiUrl, {
-                        method: 'PUT',
-                        headers,
-                        body: JSON.stringify({
-                          message: fileItem.msg,
-                          content: contentBase64,
-                          branch,
-                          ...(sha ? { sha } : {}),
-                        }),
-                      });
-                      if (!putRes.ok) {
-                        throw new Error(`GitHub API (${putRes.status}): تأكد من اسم المستودع وصلاحية الرمز.`);
-                      }
-                    }
-
-                    setStatusMsg({
-                      type: 'success',
-                      text: `تم إرسال التحديثات إلى مستودع ${cleanRepo} بنجاح! سيقوم Vercel و Netlify بالتحديث تلقائياً.`,
-                    });
-                  } catch (err) {
-                    setStatusMsg({
-                      type: 'error',
-                      text: err instanceof Error ? err.message : 'تعذر التحديث المباشر في GitHub.',
-                    });
-                  } finally {
-                    setIsPushingGithub(false);
-                  }
-                }}
-                className="px-5 py-2.5 bg-[#C9A24A] hover:bg-[#E0C878] text-[#090909] font-semibold text-xs"
-              >
-                {isPushingGithub ? 'جاري التحديث المباشر في GitHub...' : 'إرسال التحديث إلى المستودع الأساسي الآن'}
-              </button>
             </div>
           </div>
         )}

@@ -103,14 +103,16 @@ export const CMSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...nextData,
       updatedAt: new Date().toISOString(),
     };
+    // الحفظ في السحابة أولاً: إذا فشل يُرمى الخطأ للوحة التحكم ولا نعرض للمالك
+    // نسخة محلية توهمه بأن التعديل نُشر للزوار.
+    if (isLiveFirebase) {
+      await savePublicSiteContent(stamped);
+    }
     setData(stamped);
     try {
       localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(stamped));
     } catch {
       // Ignore local cache error
-    }
-    if (isLiveFirebase) {
-      await savePublicSiteContent(stamped);
     }
   };
 

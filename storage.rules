@@ -1,10 +1,13 @@
 rules_version = '2';
+// قواعد حماية Firebase Storage لموقع KINGSMEN LINE
+// - الصور العامة قابلة للقراءة للجميع، والرفع للمدير فقط (صور حتى 5MB).
+// ⚠️ بعد أي تعديل انشر القواعد: Firebase Console ← Storage ← Rules (أو firebase deploy --only storage)
 service firebase.storage {
   match /b/{bucket}/o {
     function isAdmin() {
       return request.auth != null && (
         request.auth.uid == 'nYe0azkrCYMaJ7yOrkEfkYMQ1K62' ||
-        request.auth.token.email == 'smthysan@gmail.com' ||
+        (request.auth.token.email == 'smthysan@gmail.com' && request.auth.token.email_verified == true) ||
         (
           firestore.exists(/databases/(default)/documents/admins/$(request.auth.uid)) &&
           firestore.get(/databases/(default)/documents/admins/$(request.auth.uid)).data.email == request.auth.token.email &&
@@ -14,7 +17,8 @@ service firebase.storage {
     }
     match /media/public/{category}/{fileName} {
       allow read: if true;
-      allow write: if isAdmin() && request.resource != null && request.resource.size <= 5 * 1024 * 1024 && request.resource.contentType.matches('^image/(jpeg|png|webp|avif)$');
+      allow create, update: if isAdmin() && request.resource.size <= 5 * 1024 * 1024 && request.resource.contentType.matches('^image/(jpeg|png|webp|avif)$');
+      allow delete: if isAdmin();
     }
     match /{allPaths=**} { allow read, write: if false; }
   }
