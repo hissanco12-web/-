@@ -37,6 +37,7 @@ export const CollectionsPage: React.FC<{ lang: Language }> = ({ lang }) => {
                 src={col.image}
                 alt={t(col.title, lang)}
                 className="w-full h-full group-hover:scale-105 transition-transform duration-700"
+                sizes="(min-width: 1024px) 33vw, (min-width: 640px) 50vw, 100vw"
               />
             </div>
             <div className="p-6 space-y-3 flex-1 flex flex-col justify-between">

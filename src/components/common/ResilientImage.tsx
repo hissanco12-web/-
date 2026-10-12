@@ -2,6 +2,31 @@ import React, { useState } from 'react';
 
 interface ResilientImageProps extends React.ImgHTMLAttributes<HTMLImageElement> {
   fallbackSrc?: string;
+  /** صورة أعلى الصفحة (مثل صورة الواجهة): تُحمَّل فوراً وبأولوية عالية بدل التأجيل. */
+  priority?: boolean;
+}
+
+const RESPONSIVE_WIDTHS = [480, 800, 1200, 1600];
+
+/**
+ * لصور Unsplash: يولّد عدة مقاسات (srcset) حتى يحمّل الجوال نسخة صغيرة بدل 1800px.
+ * الصور الأخرى (Firebase Storage أو Base64) تُعاد كما هي.
+ */
+function buildSrcSet(url: string): string | undefined {
+  if (!url.startsWith('https://images.unsplash.com/')) return undefined;
+  try {
+    const parsed = new URL(url);
+    const maxWidth = Number(parsed.searchParams.get('w')) || 1600;
+    const widths = RESPONSIVE_WIDTHS.filter((w) => w < maxWidth).concat(maxWidth);
+    return widths
+      .map((w) => {
+        parsed.searchParams.set('w', String(w));
+        return `${parsed.toString()} ${w}w`;
+      })
+      .join(', ');
+  } catch {
+    return undefined;
+  }
 }
 
 const DEFAULT_FALLBACK =
@@ -12,6 +37,8 @@ export const ResilientImage: React.FC<ResilientImageProps> = ({
   alt = '',
   className = '',
   fallbackSrc = DEFAULT_FALLBACK,
+  priority = false,
+  sizes = '100vw',
   ...rest
 }) => {
   const [imgSrc, setImgSrc] = useState<string>(src || fallbackSrc);
@@ -28,7 +55,12 @@ export const ResilientImage: React.FC<ResilientImageProps> = ({
       )}
       <img
         src={imgSrc}
+        srcSet={buildSrcSet(imgSrc)}
+        sizes={sizes}
         alt={alt}
+        loading={priority ? 'eager' : 'lazy'}
+        decoding="async"
+        fetchPriority={priority ? 'high' : 'auto'}
         onLoad={() => setLoaded(true)}
         onError={() => {
           if (imgSrc !== fallbackSrc) {

@@ -30,6 +30,7 @@ export const ProductCard: React.FC<{
           src={product.image}
           alt={t(product.name, lang)}
           className="w-full h-full group-hover:scale-105 transition-transform duration-700"
+          sizes="(min-width: 1024px) 33vw, (min-width: 640px) 50vw, 100vw"
         />
         <div className="absolute inset-0 bg-gradient-to-t from-[#090909] via-transparent to-transparent opacity-70" />
         {product.badge && (

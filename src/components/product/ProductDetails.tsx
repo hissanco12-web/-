@@ -35,6 +35,8 @@ export const ProductDetails: React.FC<{
             src={selectedImage || product.image}
             alt={t(product.name, lang)}
             className="w-full h-full"
+            priority
+            sizes="(min-width: 1024px) 58vw, 100vw"
           />
         </div>
         {images.length > 1 && (

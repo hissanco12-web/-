@@ -1,11 +1,11 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { CMSData } from '../types/cms';
 import { initialCMSData } from '../data/initialData';
-import {
-  fetchPublicSiteContent,
-  savePublicSiteContent,
-  isFirebaseConfigured,
-} from '../lib/firebase/integration';
+import { isFirebaseConfigured } from '../lib/firebase/config';
+
+// مكتبات Firebase ثقيلة (مئات الكيلوبايت)، لذلك تُحمَّل بعد ظهور الصفحة وليس قبلها.
+// الصفحة تُعرض فوراً من النسخة المحفوظة/الافتراضية ثم تُحدَّث من Firestore.
+const loadFirebase = () => import('../lib/firebase/integration');
 
 const LOCAL_STORAGE_KEY = 'kingsmen_line_cms_cache_v1';
 
@@ -64,6 +64,7 @@ export const CMSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const refreshCMSData = async () => {
     setIsLoading(true);
     try {
+      const { fetchPublicSiteContent } = await loadFirebase();
       const remote = await fetchPublicSiteContent();
       if (remote && remote.settings) {
         const merged: CMSData = {
@@ -89,6 +90,9 @@ export const CMSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           // Ignore storage quota issues
         }
       }
+    } catch (err) {
+      // تعذر تحميل مكتبة Firebase (شبكة ضعيفة): يبقى الموقع يعمل بالنسخة الحالية
+      console.warn('Could not load live site content:', err);
     } finally {
       setIsLoading(false);
     }
@@ -106,6 +110,7 @@ export const CMSProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // الحفظ في السحابة أولاً: إذا فشل يُرمى الخطأ للوحة التحكم ولا نعرض للمالك
     // نسخة محلية توهمه بأن التعديل نُشر للزوار.
     if (isLiveFirebase) {
+      const { savePublicSiteContent } = await loadFirebase();
       await savePublicSiteContent(stamped);
     }
     setData(stamped);

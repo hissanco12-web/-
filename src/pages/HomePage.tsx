@@ -47,6 +47,7 @@ export const HomePage: React.FC<{ lang: Language }> = ({ lang }) => {
             src={hero.image}
             alt={t(hero.title, lang)}
             className="w-full h-full"
+            priority
           />
           <div className="absolute inset-0 bg-gradient-to-r from-[#090909] via-[#090909]/85 to-[#090909]/40" />
         </div>
